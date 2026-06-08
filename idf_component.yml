@@ -1,0 +1,11 @@
+# VL53L0X ToF distance sensor -- ESP-IDF managed component manifest.
+#
+# This is flatlinerc's fork of kerikun11/ESP32_VL53L0X, modernized for ESP-IDF
+# v5/v6 (idf_component_register CMakeLists). It bundles ST's official VL53L0X
+# API plus a C++ wrapper (inc/VL53L0X.h). Consumed as a git dependency.
+version: "0.1.0"
+description: "VL53L0X time-of-flight distance sensor driver (ST API + C++ wrapper), ESP-IDF v5/v6 component. Fork of kerikun11/ESP32_VL53L0X."
+url: "https://github.com/flatlinerc/ESP32_VL53L0X"
+dependencies:
+  idf:
+    version: ">=5.0"
