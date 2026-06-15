@@ -2,9 +2,8 @@
 # wrapper). The upstream used the pre-v5 register_component()/COMPONENT_SRCS
 # syntax, which IDF v5/v6 removed; this is the modern idf_component_register form.
 #
-# The public header inc/VL53L0X.h includes "driver/i2c.h" (legacy I2C API, still
-# shipped by the `driver` component in IDF v6, deprecated-not-removed) and
-# "driver/gpio.h" (esp_driver_gpio), so both are PUBLIC requirements.
+# The public headers include the IDF v6 I2C master driver and GPIO driver, so
+# both are PUBLIC requirements for consumers.
 idf_component_register(
     SRCS
         "api/core/src/vl53l0x_api.c"
@@ -18,7 +17,7 @@ idf_component_register(
         "inc"
         "api/core/inc"
         "api/platform/inc"
-    REQUIRES driver esp_driver_gpio
+    REQUIRES esp_driver_i2c esp_driver_gpio
 )
 
 # Preserve the upstream build flag: USE_I2C_2V8 selects the sensor's 2.8 V I2C

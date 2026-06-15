@@ -1,10 +1,14 @@
 #include "vl53l0x_platform.h"
 
-#include "driver/i2c.h"
 #include "esp_err.h"
-#include "esp_log.h"
+#include "freertos/FreeRTOS.h"
+#include "freertos/task.h"
 
-#define ACK_CHECK_EN true
+#include <stdint.h>
+#include <stdlib.h>
+#include <string.h>
+
+#define I2C_XFER_TIMEOUT_MS 1000
 
 VL53L0X_Error esp_to_vl53l0x_error(esp_err_t esp_err) {
     switch (esp_err) {
@@ -12,6 +16,7 @@ VL53L0X_Error esp_to_vl53l0x_error(esp_err_t esp_err) {
             return VL53L0X_ERROR_NONE;
         case ESP_ERR_INVALID_ARG:
             return VL53L0X_ERROR_INVALID_PARAMS;
+        case ESP_ERR_INVALID_RESPONSE:
         case ESP_FAIL:
         case ESP_ERR_INVALID_STATE:
             return VL53L0X_ERROR_CONTROL_INTERFACE;
@@ -33,26 +38,23 @@ VL53L0X_Error esp_to_vl53l0x_error(esp_err_t esp_err) {
  */
 VL53L0X_Error VL53L0X_WriteMulti(VL53L0X_DEV Dev, uint8_t index, uint8_t *pdata, uint32_t count)
 {
-    i2c_cmd_handle_t cmd = i2c_cmd_link_create();
-    i2c_master_start(cmd);
-
-    // write I2C address
-    i2c_master_write_byte(cmd, ( Dev->i2c_address << 1 ) | I2C_MASTER_WRITE, ACK_CHECK_EN);
-
-    // write register
-    i2c_master_write_byte(cmd, index, ACK_CHECK_EN);
-
-    // Data
-    // Note: Needed to use i2c_master_write_byte as i2c_master_write will not expect an ack
-    // after each byte
-    for (int i = 0; i < count; i++)
-    {
-        i2c_master_write_byte(cmd, *(pdata + i), ACK_CHECK_EN);
+    if (Dev == NULL || Dev->i2c_dev == NULL || (count > 0 && pdata == NULL) ||
+        count == UINT32_MAX) {
+        return VL53L0X_ERROR_INVALID_PARAMS;
     }
 
-    i2c_master_stop(cmd);
-    esp_err_t ret = i2c_master_cmd_begin(Dev->i2c_port_num, cmd, pdMS_TO_TICKS(1000));
-    i2c_cmd_link_delete(cmd);
+    uint8_t *write_buf = (uint8_t *)malloc(count + 1);
+    if (write_buf == NULL) {
+        return VL53L0X_ERROR_CONTROL_INTERFACE;
+    }
+
+    write_buf[0] = index;
+    if (count > 0) {
+        memcpy(&write_buf[1], pdata, count);
+    }
+
+    esp_err_t ret = i2c_master_transmit(Dev->i2c_dev, write_buf, count + 1, I2C_XFER_TIMEOUT_MS);
+    free(write_buf);
 
     return esp_to_vl53l0x_error(ret);
 }
@@ -68,29 +70,15 @@ VL53L0X_Error VL53L0X_WriteMulti(VL53L0X_DEV Dev, uint8_t index, uint8_t *pdata,
  */
 VL53L0X_Error VL53L0X_ReadMulti(VL53L0X_DEV Dev, uint8_t index, uint8_t *pdata, uint32_t count)
 {
-    // I2C write
-    i2c_cmd_handle_t cmd = i2c_cmd_link_create();
+    if (Dev == NULL || Dev->i2c_dev == NULL || (count > 0 && pdata == NULL)) {
+        return VL53L0X_ERROR_INVALID_PARAMS;
+    }
+    if (count == 0) {
+        return VL53L0X_ERROR_NONE;
+    }
 
-    ////// First tell the VL53L0X which register we are reading from
-    ESP_ERROR_CHECK(i2c_master_start(cmd));
-
-    // Write I2C address
-    ESP_ERROR_CHECK(i2c_master_write_byte(cmd, ( Dev->i2c_address << 1 ) | I2C_MASTER_WRITE, ACK_CHECK_EN));
-    // Write register
-    ESP_ERROR_CHECK(i2c_master_write_byte(cmd, index, ACK_CHECK_EN));
-
-    ////// Second, read from the register
-    ESP_ERROR_CHECK(i2c_master_start(cmd));
-
-    // Write I2C address
-    ESP_ERROR_CHECK(i2c_master_write_byte(cmd, ( Dev->i2c_address << 1 ) | I2C_MASTER_READ, ACK_CHECK_EN));
-
-    // Read data from register
-    ESP_ERROR_CHECK(i2c_master_read(cmd, pdata, count, I2C_MASTER_LAST_NACK));
-
-    ESP_ERROR_CHECK(i2c_master_stop(cmd));
-    esp_err_t ret = i2c_master_cmd_begin(Dev->i2c_port_num, cmd, pdMS_TO_TICKS(1000));
-    i2c_cmd_link_delete(cmd);
+    esp_err_t ret = i2c_master_transmit_receive(
+        Dev->i2c_dev, &index, sizeof(index), pdata, count, I2C_XFER_TIMEOUT_MS);
 
     return esp_to_vl53l0x_error(ret);
 }

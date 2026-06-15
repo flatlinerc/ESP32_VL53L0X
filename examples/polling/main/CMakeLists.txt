@@ -1,5 +1,1 @@
-set(COMPONENT_SRCS
-    "app_main.cpp"
-)
-
-register_component()
+idf_component_register(SRCS "app_main.cpp")

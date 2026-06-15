@@ -11,12 +11,13 @@
 #include "freertos/task.h"
 
 #include "driver/gpio.h"
-#include "driver/i2c.h"
+#include "driver/i2c_master.h"
 
 #include "vl53l0x_api.h"
 #include "vl53l0x_def.h"
 #include "vl53l0x_platform.h"
 
+#include "esp_err.h"
 #include "esp_log.h"
 
 static constexpr uint8_t VL53L0X_I2C_ADDRESS_DEFAULT = 0x29;
@@ -31,6 +32,29 @@ public:
           gpio_num_t gpio_gpio1 = GPIO_NUM_MAX)
       : i2c_port(i2c_port), gpio_xshut(gpio_xshut), gpio_gpio1(gpio_gpio1) {
     vSemaphoreCreateBinary(xSemaphore);
+  }
+
+  VL53L0X(i2c_master_bus_handle_t i2c_bus,
+          gpio_num_t gpio_xshut = GPIO_NUM_MAX,
+          gpio_num_t gpio_gpio1 = GPIO_NUM_MAX, uint32_t freq = 400000)
+      : i2c_bus(i2c_bus), gpio_xshut(gpio_xshut), gpio_gpio1(gpio_gpio1),
+        i2c_freq(freq) {
+    vSemaphoreCreateBinary(xSemaphore);
+  }
+
+  VL53L0X(const VL53L0X &) = delete;
+  VL53L0X &operator=(const VL53L0X &) = delete;
+
+  ~VL53L0X() {
+    if (i2c_dev != nullptr) {
+      ESP_ERROR_CHECK_WITHOUT_ABORT(i2c_master_bus_rm_device(i2c_dev));
+    }
+    if (owns_i2c_bus && i2c_bus != nullptr) {
+      ESP_ERROR_CHECK_WITHOUT_ABORT(i2c_del_master_bus(i2c_bus));
+    }
+    if (xSemaphore != NULL) {
+      vSemaphoreDelete(xSemaphore);
+    }
   }
 
   bool init() {
@@ -49,8 +73,8 @@ public:
       ESP_ERROR_CHECK(gpio_intr_enable(gpio_gpio1));
     }
     /* device init */
-    vl53l0x_dev.i2c_port_num = i2c_port;
-    vl53l0x_dev.i2c_address = VL53L0X_I2C_ADDRESS_DEFAULT;
+    if (!ensureI2CDevice())
+      return false;
     reset();
     if (init_vl53l0x(&vl53l0x_dev) != VL53L0X_ERROR_NONE)
       return false;
@@ -100,7 +124,12 @@ public:
       return false;
     }
 
-    vl53l0x_dev.i2c_address = new_address;
+    esp_err_t ret = configureI2CDevice(new_address);
+    if (ret != ESP_OK) {
+      ESP_LOGE(TAG, "Failed to update I2C device handle: %s",
+               esp_err_to_name(ret));
+      return false;
+    }
 
     return true;
   }
@@ -197,16 +226,20 @@ public:
 
   void i2cMasterInit(gpio_num_t pin_sda = GPIO_NUM_21,
                      gpio_num_t pin_scl = GPIO_NUM_22, uint32_t freq = 400000) {
-    i2c_config_t conf;
-    memset(&conf, 0, sizeof(i2c_config_t));
-    conf.mode = I2C_MODE_MASTER;
-    conf.sda_io_num = pin_sda;
-    conf.sda_pullup_en = GPIO_PULLUP_ENABLE;
-    conf.scl_io_num = pin_scl;
-    conf.scl_pullup_en = GPIO_PULLUP_ENABLE;
-    conf.master.clk_speed = freq;
-    ESP_ERROR_CHECK(i2c_param_config(i2c_port, &conf));
-    ESP_ERROR_CHECK(i2c_driver_install(i2c_port, conf.mode, 0, 0, 0));
+    i2c_freq = freq;
+    if (i2c_bus == nullptr) {
+      i2c_master_bus_config_t bus_config = {};
+      bus_config.clk_source = I2C_CLK_SRC_DEFAULT;
+      bus_config.i2c_port = i2c_port;
+      bus_config.sda_io_num = pin_sda;
+      bus_config.scl_io_num = pin_scl;
+      bus_config.glitch_ignore_cnt = 7;
+      bus_config.flags.enable_internal_pullup = true;
+
+      ESP_ERROR_CHECK(i2c_new_master_bus(&bus_config, &i2c_bus));
+      owns_i2c_bus = true;
+    }
+    ESP_ERROR_CHECK(configureI2CDevice(VL53L0X_I2C_ADDRESS_DEFAULT));
   }
 
   bool setTimingBudget(uint32_t TimingBudgetMicroSeconds) {
@@ -222,12 +255,57 @@ public:
 
 protected:
   static constexpr const char *TAG = "VL53L0X";
-  i2c_port_t i2c_port;
+  i2c_port_t i2c_port = I2C_NUM_0;
+  i2c_master_bus_handle_t i2c_bus = nullptr;
+  i2c_master_dev_handle_t i2c_dev = nullptr;
+  bool owns_i2c_bus = false;
+  uint8_t i2c_address = VL53L0X_I2C_ADDRESS_DEFAULT;
   gpio_num_t gpio_xshut;
   gpio_num_t gpio_gpio1;
   VL53L0X_Dev_t vl53l0x_dev;
-  volatile SemaphoreHandle_t xSemaphore = NULL;
+  SemaphoreHandle_t xSemaphore = NULL;
   int32_t TimingBudgetMicroSeconds;
+  uint32_t i2c_freq = 400000;
+
+  bool ensureI2CDevice() {
+    if (i2c_dev != nullptr) {
+      vl53l0x_dev.i2c_dev = i2c_dev;
+      vl53l0x_dev.i2c_address = i2c_address;
+      return true;
+    }
+    if (i2c_bus == nullptr) {
+      ESP_LOGE(TAG, "I2C bus is not initialized");
+      return false;
+    }
+    return configureI2CDevice(i2c_address) == ESP_OK;
+  }
+
+  esp_err_t configureI2CDevice(uint8_t address) {
+    if (i2c_bus == nullptr) {
+      return ESP_ERR_INVALID_STATE;
+    }
+    if (i2c_dev != nullptr) {
+      esp_err_t rm_ret = i2c_master_bus_rm_device(i2c_dev);
+      if (rm_ret != ESP_OK) {
+        return rm_ret;
+      }
+      i2c_dev = nullptr;
+      vl53l0x_dev.i2c_dev = nullptr;
+    }
+
+    i2c_device_config_t dev_config = {};
+    dev_config.dev_addr_length = I2C_ADDR_BIT_LEN_7;
+    dev_config.device_address = address;
+    dev_config.scl_speed_hz = i2c_freq;
+
+    esp_err_t ret = i2c_master_bus_add_device(i2c_bus, &dev_config, &i2c_dev);
+    if (ret == ESP_OK) {
+      i2c_address = address;
+      vl53l0x_dev.i2c_address = address;
+      vl53l0x_dev.i2c_dev = i2c_dev;
+    }
+    return ret;
+  }
 
   static void IRAM_ATTR gpio1_isr(void *arg) {
     VL53L0X *obj = static_cast<VL53L0X *>(arg);
